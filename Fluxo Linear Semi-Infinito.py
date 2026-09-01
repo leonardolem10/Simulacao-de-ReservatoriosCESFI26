@@ -22,27 +22,11 @@ def solucao_analitica(x,t):
         return np.ones_like(x)*p0
 
 
-    termo1 = np.sqrt(
-        (4*eta*t)/(np.pi*L**2)
-    ) * np.exp(
-        -x**2/(4*eta*t)
-    )
+    termo1 = np.sqrt((4*eta*t)/(np.pi*L**2)) * np.exp(-x**2/(4*eta*t))
 
 
-    termo2 = (
-        x/L
-    ) * erfc(
-        x/np.sqrt(4*eta*t)
-    )
-
-
-    pressao = p0 - (
-        (qw*mi*L)/(k*A)
-        *
-        (termo1-termo2)
-    )
-
-
+    termo2 = (x/L) * erfc(x/np.sqrt(4*eta*t))
+    pressao = p0 - ((qw*mi*L)/(k*A)*(termo1-termo2))
     return pressao
 
 
@@ -61,23 +45,14 @@ for t in tempos:
 
     p = solucao_analitica(x,t)
 
-    plt.plot(
-        x,
-        p,
-        label=f"t = {t} h"
-    )
+    plt.plot( x, p,label=f"t = {t} h")
 
 
 plt.xlabel("Distância x (m)")
 plt.ylabel("Pressão (kgf/cm²)")
 
 
-plt.title(
-    "Solução Analítica 1D - Fluxo Linear Semi-Infinito (Caso 2)"
-)
-
-
+plt.title("Solução Analítica 1D - Fluxo Linear Semi-Infinito (Caso 2)")
 plt.grid(True)
 plt.legend()
-
 plt.show()
