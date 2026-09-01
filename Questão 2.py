@@ -2,13 +2,12 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-p0 = 300       # Pressão inicial (kgf/cm²)
-pw = 150       # Pressão na fronteira esquerda (kgf/cm²)
+p0 = 300       
+pw = 150       
 
-k = 400        # Permeabilidade (mD)
-mi = 2         # Viscosidade (cP)
-phi = 0.25     # Porosidade
-ct = 100e-6    # Compressibilidade ((kgf/cm²)^-1)
+k = 400        
+mi = 2         
+phi = 0.25     
+ct = 100e-6    
 
-L = 200        # Comprimento do meio poroso (m)
-
+L = 200        
