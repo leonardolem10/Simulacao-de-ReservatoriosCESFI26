@@ -465,3 +465,34 @@ plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+solvers = ['Explícito (FTCS)', 'Implícito (Gauss-Seidel)', 'Implícito (Solver Direto)']
+tempos = [tempo_exp, tempo_gs, tempo_dir]
+iteracoes_totais = ['-', f"{total_iter_gs}", '-']
+iteracoes_medias = ['-', f"{media_iter_gs:.1f}", '-']
+
+print("\n" + "=" * 80)
+print("TABELA: COMPARATIVO DE DESEMPENHO E CUSTO COMPUTACIONAL")
+print("=" * 80)
+cabecalho_perf = f"{'Método Linear':<28}{'Tempo Total (s)':<18}{'Iterações Totais':<20}{'Iterações / Passo':<18}"
+print(cabecalho_perf)
+print("-" * 80)
+for s, t, it_tot, it_med in zip(solvers, tempos, iteracoes_totais, iteracoes_medias):
+    print(f"{s:<28}{t:<18.4f}{it_tot:<20}{it_med:<18}")
+print("=" * 80)
+
+plt.figure(figsize=(8, 5))
+cores = ['#2ca02c', '#1f77b4', '#ff7f0e']
+barras = plt.bar(solvers, tempos, color=cores, width=0.55, edgecolor='black')
+
+for barra in barras:
+    altura = barra.get_height()
+    plt.text(barra.get_x() + barra.get_width() / 2.0, altura,
+             f'{altura:.3f} s',
+             ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+plt.title('Comparativo de Tempo Computacional por Método', fontsize=12)
+plt.ylabel('Tempo de Execução (s)', fontsize=11)
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.show()
