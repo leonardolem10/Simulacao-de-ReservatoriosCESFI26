@@ -8,28 +8,27 @@ def gerar_campo_lognormal(nx, ny, media_mD=100.0, sigma=0.5, seed=42):
     # Limita valores entre patamares físicos realistas (ex: 10 mD a 1500 mD)
     return np.clip(k_mD, 5.0, 2000.0)
 
-# PROBLEMA 1: Meio heterogéneo (produtor central)
+import numpy as np
+
+
 def gerar_permeabilidade_p1(nx, ny):
-    k_mD = gerar_campo_lognormal(nx, ny, media_mD=150.0, sigma=0.6, seed=101)
-    k_m2 = k_mD * 9.869233e-16
-    return k_mD, k_m2
+  perm_mD = np.full((nx, ny), 500.0, dtype=float)
+  perm_mD[8:23, 8:15] = 50.0
+  perm_mD[8:23, 16:23] = 150.0
+  return perm_mD
 
-# PROBLEMA 2: Meio heterogéneo COM falha selante
+
 def gerar_permeabilidade_p2(nx, ny):
-    k_mD = gerar_campo_lognormal(nx, ny, media_mD=100.0, sigma=0.6, seed=202)
-    
-    col_falha = int(ny * 0.33)          # X ~ 33 m
-    linha_ini = int(nx * 0.13)          # Y ~ 13 m
-    linha_fim = int(nx * 0.83)          # Y ~ 83 m
-    
-    # Inserção da falha quase selante (1e-5 mD) sobre a matriz heterogénea
-    k_mD[linha_ini:linha_fim + 1, col_falha] = 1e-5
-    k_m2 = k_mD * 9.869233e-16
-    
-    return k_mD, k_m2, col_falha, linha_ini, linha_fim
+  perm_mD = np.full((nx, ny), 100.0, dtype=float)
+  col_falha = int(ny * 0.35)
+  linha_ini_falha = int(nx * 0.15)
+  linha_fim_falha = int(nx * 0.85)
+  perm_mD[linha_ini_falha:linha_fim_falha, col_falha] = 1.0e-5
+  return (perm_mD, col_falha, linha_ini_falha, linha_fim_falha)
 
-# PROBLEMA 3: Meio heterogéneo (Five-Spot completo)
+
 def gerar_permeabilidade_p3(nx, ny):
-    k_mD = gerar_campo_lognormal(nx, ny, media_mD=120.0, sigma=0.6, seed=303)
-    k_m2 = k_mD * 9.869233e-16
-    return k_mD, k_m2
+  perm_mD = np.full((nx, ny), 100.0, dtype=float)
+  perm_mD[8:23, 8:15] = 50.0
+  perm_mD[8:23, 16:23] = 150.0
+  return perm_mD
