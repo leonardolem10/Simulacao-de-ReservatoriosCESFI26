@@ -6,9 +6,8 @@ import matplotlib.pyplot as plt
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-# ==============================================================================
-# CONFIGURAÇÃO DE SALVAMENTO AUTOMÁTICO DE GRÁFICOS (PADRÃO T3)
-# ==============================================================================
+# CONFIGURAÇÃO DE SALVAMENTO AUTOMÁTICO DE GRÁFICOS
+
 PASTA_GRAFICOS = os.path.join(
     os.path.expanduser("~"),
     "Downloads",
@@ -37,9 +36,8 @@ from gerador_permeabilidade import (
     gerar_permeabilidade_p3
 )
 
-# ==============================================================================
 # 1. PARÂMETROS GERAIS DO RESERVATÓRIO
-# ==============================================================================
+
 Lx, Ly, h = 100.0, 100.0, 12.0
 nx, ny = 31, 31
 N = nx * ny
@@ -56,9 +54,8 @@ phi = 0.20                 # Porosidade
 c = 15e-5 / 98066.5        # Compressibilidade total -> Pa^-1
 rw, skin = 0.10, 0.0       # Raio do poço e dano nulo
 
-# ==============================================================================
 # 2. OPERADORES NUMÉRICOS DO MÉTODO DOS VOLUMES FINITOS (MVF - AULA 13)
-# ==============================================================================
+
 def velocidades_darcy_mvf(p, perm, mu, dx, dy):
     """Calcula a velocidade de Darcy nas faces dos volumes finitos e interpola no centro."""
     n0, n1 = p.shape
@@ -180,7 +177,7 @@ def montar_sistema_mvf(perm, dt, condicoes_fronteira, pocos_produtores):
 
 def validar_simulacao(nome, P_final, pwf_ref, vazoes, Np_final, Ninj_acum=0.0):
     """
-    Verificação física rigorosa e balanço global de volume.
+    Verificação física e balanço global de volume.
     Restaura tolerância estrita de 1e-4 Pa e imprime todas as variáveis das Tabelas 3 e 4 em bar.
     """
     erros = []
@@ -268,9 +265,8 @@ def simular_cenario(nome, perm, tempo_total, nt, pocos_produtores, pocos_injetor
         "dt": dt
     }
 
-# ==============================================================================
 # 3. FUNÇÕES GRÁFICAS COMPACTAS (GRADE 2x2, MESMO PADRÃO VISUAL DO T3)
-# ==============================================================================
+
 def plotar_evolucao_pressao(campos, titulo, pwf_min, p0_max, poco_pos, falha_coords=None, inj_coords=None):
     fig, axs = plt.subplots(2, 2, figsize=(11.5, 9.8), sharex=True, sharey=True)
     axs = axs.ravel()
@@ -379,9 +375,8 @@ def plotar_desempenho(tempo_list, q_prod_list, Np_list, titulo, q_inj_total=None
     plt.tight_layout()
     salvar_e_fechar()
 
-# ==============================================================================
 # 4. EXECUÇÃO — PROBLEMA 1: PRODUTOR CENTRAL
-# ==============================================================================
+
 res_p1 = gerar_permeabilidade_p1(nx, ny)
 perm_p1_mD = np.asarray(res_p1[0] if isinstance(res_p1, tuple) else res_p1, dtype=float)
 perm_p1 = perm_p1_mD * 9.869233e-16
@@ -407,9 +402,8 @@ plotar_desempenho(sim_p1["tempo"], sim_p1["q_prod"], sim_p1["Np"], "Problema 1: 
 
 validar_simulacao("Problema 1 — Produtor Central", sim_p1["P_final"], pwf, sim_p1["q_prod"][1:], sim_p1["Np"][-1])
 
-# ==============================================================================
 # 5. EXECUÇÃO — PROBLEMA 2: FALHA SELANTE E PRODUTOR DESCENTRALIZADO
-# ==============================================================================
+
 res_p2 = gerar_permeabilidade_p2(nx, ny)
 if len(res_p2) == 5:
     perm_p2_mD, _, col_falha, l_ini, l_fim = res_p2
@@ -454,9 +448,8 @@ plotar_desempenho(sim_p2["tempo"], sim_p2["q_prod"], sim_p2["Np"], "Problema 2: 
 
 validar_simulacao("Problema 2 — Produtor com Falha", sim_p2["P_final"], pwf, sim_p2["q_prod"][1:], sim_p2["Np"][-1])
 
-# ==============================================================================
 # 6. EXECUÇÃO — PROBLEMA 3: FIVE-SPOT COMPLETO
-# ==============================================================================
+
 res_p3 = gerar_permeabilidade_p3(nx, ny)
 perm_p3_mD = np.asarray(res_p3[0] if isinstance(res_p3, tuple) else res_p3, dtype=float)
 perm_p3 = perm_p3_mD * 9.869233e-16
@@ -493,9 +486,8 @@ plotar_desempenho(sim_p3["tempo"], sim_p3["q_prod"], sim_p3["Np"], "Problema 3: 
 Ninj_total3 = 4.0 * qw_cada * 4.0 * 3600.0
 validar_simulacao("Problema 3 — Five-Spot", sim_p3["P_final"], pwf, sim_p3["q_prod"][1:], sim_p3["Np"][-1], Ninj_acum=Ninj_total3)
 
-# ==============================================================================
 # 7. VALIDAÇÕES ANALÍTICAS 1D (AULA 12/13)
-# ==============================================================================
+
 def validar_analitica_1d_heterogeneo_mvf():
     p_w_1d, p_e_1d = 100.0 * 1e5, 160.0 * 1e5
     bc_1d = {
@@ -581,9 +573,8 @@ def validar_analitica_1d_transiente_homogeneo_mvf():
 validar_analitica_1d_heterogeneo_mvf()
 validar_analitica_1d_transiente_homogeneo_mvf()
 
-# ==============================================================================
 # 8. TESTE DE CONVERGÊNCIA TEMPORAL (REFINAMENTO DE dt)
-# ==============================================================================
+
 def testar_convergencia_temporal():
     nt_refinado = 200
     sim_ref = simular_cenario("Convergência MVF P1 (nt=200)", perm_p1, 2.0 * 3600.0, nt_refinado, poco_p1, {}, [nt_refinado])
@@ -597,9 +588,8 @@ def testar_convergencia_temporal():
 
 testar_convergencia_temporal()
 
-# ==============================================================================
 # 9. TESTE DA CONDIÇÃO DE CONTORNO DE FLUXO PRESCRITO
-# ==============================================================================
+
 def validar_teste_fluxo_prescrito():
 
     dt_teste = 36.0
