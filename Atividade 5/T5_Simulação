@@ -1,0 +1,525 @@
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+from scipy.optimize import brentq
+from types import SimpleNamespace
+import os
+import sys
+
+PASTA_GRAFICOS = os.path.join(
+    os.path.expanduser("~"),
+    "Downloads",
+    "graficos_simulacao_t5"
+)
+
+os.makedirs(PASTA_GRAFICOS, exist_ok=True)
+
+for arq in os.listdir(PASTA_GRAFICOS):
+    if arq.endswith(".png"):
+        try:
+            os.remove(os.path.join(PASTA_GRAFICOS, arq))
+        except OSError:
+            pass
+
+contador_graficos = 0
+
+def salvar_e_fechar():
+    global contador_graficos
+    contador_graficos += 1
+
+    caminho = os.path.join(
+        PASTA_GRAFICOS,
+        f"grafico_{contador_graficos:02d}.png"
+    )
+
+    for _ in range(5):
+        try:
+            plt.savefig(
+                caminho,
+                dpi=150,
+                bbox_inches="tight",
+                pil_kwargs={"optimize": True}
+            )
+            print(f"Gráfico salvo (leve para LaTeX): {caminho}")
+            plt.close()
+            return
+        except OSError:
+            time.sleep(0.3)
+
+    plt.close()
+    raise OSError(f"Erro ao salvar o gráfico: {caminho}")
+
+# 1. PARÂMETROS GERAIS (meio homogêneo, SI)  -- nomenclatura das Aulas 11, 15, 17, 18 e 19
+
+BAR, DIA = 1.0e5, 86400.0
+h, phi = 8.5, 0.25                  # Espessura [m] e porosidade (Rosa, Ex. 14.7)
+k_abs = 1000.0 * 9.869233e-16       # Permeabilidade homogênea: 1000 mD -> m² (hipótese: o Rosa não fornece k)
+ct = 1.0e-10                        # Compressibilidade total [Pa^-1] (pequena: aproxima ∇·v_T = 0 da Aula 18)
+p_ini = 100.0 * BAR                 # Pressão inicial uniforme
+pw = 100.0 * BAR                    # Pressão de fundo de poço (p_w) / pressão de saída
+rw, skin = 0.10, 0.0                # Raio do poço e dano nulo
+
+# Permeabilidades relativas (Aula 19):  S*_w = (Sw - Swi) / (1 - Sor - Swi)
+#   Pistão (idealizado): krw = S*_w, kro = 1 - S*_w, mu_w = mu_o  -> F_w linear, frente em degrau
+#   Corey (Buckley-Leverett): krw = krw0 (S*_w)^nw, kro = kro0 (1 - S*_w)^no
+rp_pistao = dict(Swi=0.25, Sor=0.20, krw0=1.0, kro0=1.0, nw=1.0, no=1.0, mu_w=0.5e-3, mu_o=0.5e-3)
+# Rosa, Ex. 14.8 (caso 1): mu_w = 0,5 cP, mu_o = 5 cP, Swi = 0,25, Sor = 0,20, kro0 = 0,7 (no = 2), krw0 = 0,4 (nw = 2)
+rp_corey = dict(Swi=0.25, Sor=0.20, krw0=0.4, kro0=0.7, nw=2.0, no=2.0, mu_w=0.5e-3, mu_o=5.0e-3)
+
+def criar_malha(nx, ny, Lx, Ly):
+    """Malha de volumes finitos centrados. Matrizes (ny, nx): índice [i, j] = (linha em y, coluna em x)."""
+    dx, dy = Lx / nx, Ly / ny
+    dV = h * dx * dy                                  # ΔV_P = h Δx Δy
+    return SimpleNamespace(
+        nx=nx, ny=ny, N=nx * ny, Lx=Lx, Ly=Ly, dx=dx, dy=dy, dV=dV, Vp=phi * dV,
+        x_c=(np.arange(nx) + 0.5) * dx, y_c=(np.arange(ny) + 0.5) * dy
+    )
+
+# 2. PERMEABILIDADE RELATIVA, FLUXO FRACIONÁRIO E SOLUÇÕES ANALÍTICAS (Aula 19)
+
+def kr(Sw, rp):
+    Sn = np.clip((Sw - rp['Swi']) / (1.0 - rp['Sor'] - rp['Swi']), 0.0, 1.0)     # S*_w
+    return rp['krw0'] * Sn ** rp['nw'], rp['kro0'] * (1.0 - Sn) ** rp['no']
+
+def Fw(Sw, rp):
+    """F_w = (krw/mu_w) / (krw/mu_w + kro/mu_o)"""
+    krw, kro = kr(Sw, rp)
+    lamW, lamO = krw / rp['mu_w'], kro / rp['mu_o']
+    return lamW / (lamW + lamO)
+
+def dFw(Sw, rp, dS=1.0e-5):
+    """F'_w por derivada numérica central (h = 1e-5, Aula 19)."""
+    return (Fw(Sw + dS, rp) - Fw(Sw - dS, rp)) / (2.0 * dS)
+
+def dFw_maximo(rp):
+    S = np.linspace(rp['Swi'], 1.0 - rp['Sor'], 2001)
+    return np.max(dFw(S, rp))
+
+def saturacao_frente(rp):
+    """Saturação da frente S_wf: raiz de g(Sw) = F'_w(Sw) - [F_w(Sw) - F_w(Swi)] / (Sw - Swi) (brentq, Aula 19)."""
+    Swi, Sinj = rp['Swi'], 1.0 - rp['Sor']
+    g = lambda S: dFw(S, rp) - (Fw(S, rp) - Fw(Swi, rp)) / (S - Swi)
+    return brentq(g, Swi + 1.0e-3, Sinj - 1.0e-3)
+
+def solucao_pistao(x, t, uT, rp):
+    """Deslocamento pistão: Sw = 1 - Sor para x < x_f(t) e Swi para x > x_f(t); x_f = uT t / (phi (1 - Sor - Swi))."""
+    xf = uT * t / (phi * (1.0 - rp['Sor'] - rp['Swi']))
+    return np.where(x < xf, 1.0 - rp['Sor'], rp['Swi']), 1.0 - rp['Sor'], xf
+
+def solucao_buckley_leverett(x, t, uT, rp):
+    """Buckley-Leverett: Sw = S_inj (x < v_c(S_inj) t); F'_w^-1(phi x / (uT t)) (região de rarefação); Swi (x >= x_f).
+    x_f = uT t F'_w(S_wf) / phi.  Retorna Sw(x, t), S_wf e x_f(t)."""
+    Swi, Sinj = rp['Swi'], 1.0 - rp['Sor']
+    Swf = saturacao_frente(rp)
+    xf = uT * t / phi * dFw(Swf, rp)
+
+    S_r = np.linspace(Swf, Sinj, 4001)                # ramo da rarefação: F'_w decrescente com Sw
+    d_r = dFw(S_r, rp)
+    Sw = np.interp(phi * x / (uT * t), d_r[::-1], S_r[::-1])      # inversa de F'_w
+    return np.where(x >= xf, Swi, Sw), Swf, xf
+
+# 3. MÉTODO IMPES (Aulas 17 e 18): pressão implícita + saturação explícita
+
+def passo_impes(G, perm, rp, p0, Sw0, dt, inj, prod, dFw_max):
+    """Um passo IMPES. p0, Sw0: campos (ny, nx) do nível de tempo anterior.
+    inj  = {(i, j): q_inj [m³/s]}
+    prod = {(i, j): (p_w [Pa], WI [m³])}   (WI inclui k; mobilidade λ_T multiplica)"""
+    nx, ny, dx, dy = G.nx, G.ny, G.dx, G.dy
+    krw, kro = kr(Sw0, rp)
+    lamW, lamO = krw / rp['mu_w'], kro / rp['mu_o']
+    lamT = lamW + lamO                                # λ_T = λ_w + λ_o
+    FwP = lamW / lamT                                 # F_w do bloco
+
+    # Coeficientes A_E = A_W e A_N = A_S: (k/Δ²) λ_T com upwind (compara pressões) e k na face = média harmônica
+    kx = 2.0 * perm[:, :-1] * perm[:, 1:] / (perm[:, :-1] + perm[:, 1:])
+    ky = 2.0 * perm[:-1, :] * perm[1:, :] / (perm[:-1, :] + perm[1:, :])
+    Tx = kx * dy * h / dx * np.where(p0[:, :-1] >= p0[:, 1:], lamT[:, :-1], lamT[:, 1:])
+    Ty = ky * dx * h / dy * np.where(p0[:-1, :] >= p0[1:, :], lamT[:-1, :], lamT[1:, :])
+
+    # Equação da pressão:  A_P p_P - A_E p_E - A_W p_W - A_N p_N - A_S p_S = b_P
+    C_dt = G.dV * phi * ct / dt
+    AP = np.full((ny, nx), C_dt)
+    AP[:, :-1] += Tx
+    AP[:, 1:] += Tx
+    AP[:-1, :] += Ty
+    AP[1:, :] += Ty
+    b = C_dt * p0
+
+    for (i, j), (p_w, WI) in prod.items():            # Produtor (Aulas 11 e 17): q_prod = λ_T WI (p_P - p_w) -> A_P e b
+        AP[i, j] += WI * lamT[i, j]
+        b[i, j] += WI * lamT[i, j] * p_w
+    for (i, j), q in inj.items():                     # Injetor: vazão prescrita -> apenas em b
+        b[i, j] += q
+
+    idx = np.arange(G.N).reshape(ny, nx)
+    r = np.concatenate([idx[:, :-1].ravel(), idx[:, 1:].ravel(), idx[:-1, :].ravel(), idx[1:, :].ravel(), idx.ravel()])
+    c = np.concatenate([idx[:, 1:].ravel(), idx[:, :-1].ravel(), idx[1:, :].ravel(), idx[:-1, :].ravel(), idx.ravel()])
+    v = np.concatenate([-Tx.ravel(), -Tx.ravel(), -Ty.ravel(), -Ty.ravel(), AP.ravel()])
+    A = sp.coo_matrix((v, (r, c)), shape=(G.N, G.N)).tocsr()
+
+    p = spla.spsolve(A, b.ravel()).reshape(ny, nx)
+
+    # Vazões totais q_T nas faces (positivo: W->E e S->N) e vazão de água F_w q_T com F_w a montante
+    qx = Tx * (p[:, :-1] - p[:, 1:])
+    qy = Ty * (p[:-1, :] - p[1:, :])
+    Fwx = np.where(qx >= 0.0, FwP[:, :-1], FwP[:, 1:])
+    Fwy = np.where(qy >= 0.0, FwP[:-1, :], FwP[1:, :])
+
+    saida_w = np.zeros((ny, nx))    # saldo líquido de água que sai de cada bloco [m³/s]
+    saida_T = np.zeros((ny, nx))    # soma das vazões totais que saem do bloco (para o CFL)
+    saida_w[:, :-1] += Fwx * qx
+    saida_w[:, 1:] -= Fwx * qx
+    saida_w[:-1, :] += Fwy * qy
+    saida_w[1:, :] -= Fwy * qy
+    saida_T[:, :-1] += np.maximum(qx, 0.0)
+    saida_T[:, 1:] += np.maximum(-qx, 0.0)
+    saida_T[:-1, :] += np.maximum(qy, 0.0)
+    saida_T[1:, :] += np.maximum(-qy, 0.0)
+
+    qT_prod, qw_prod = 0.0, 0.0
+    for (i, j), (p_w, WI) in prod.items():            # q_w = F_w q_prod (Aula 17)
+        qT = WI * lamT[i, j] * (p[i, j] - p_w)
+        saida_w[i, j] += FwP[i, j] * qT
+        saida_T[i, j] += max(qT, 0.0)
+        qT_prod += qT
+        qw_prod += FwP[i, j] * qT
+    for (i, j), q in inj.items():                     # q_T = q_w = q_inj (só água é injetada)
+        saida_w[i, j] -= q
+
+    Sw = Sw0 - dt / G.Vp * saida_w                    # Saturação explícita (Aula 18)
+    smax = saida_T.max()
+    CFL = dt * smax * dFw_max / G.Vp                  # Aula 17: Δt <= phi ΔV_P / (q_T,P F'_w,max)
+    return p, Sw, qT_prod, qw_prod, CFL, smax
+
+def simular_cenario(nome, G, perm, rp, tempo_total, t_salvos, inj, prod, cfl_alvo=0.5):
+    dFw_max = dFw_maximo(rp)
+    p = np.full((G.ny, G.nx), p_ini)
+    Sw = np.full((G.ny, G.nx), rp['Swi'])
+    q_inj_tot = sum(inj.values())
+
+    t, dt_ant, dt_cfl = 0.0, 1.0e-4 * tempo_total, np.inf
+    dt_max, dt_min = tempo_total / 200.0, 1.0e-9 * tempo_total
+    t_alvos = sorted(set(t_salvos) | {tempo_total})
+    tempo, q_o, q_w, dts = [0.0], [0.0], [0.0], [0.0]
+    campos_P, campos_S = {}, {}
+
+    t_exec = time.time()
+    while t < tempo_total * (1.0 - 1e-12):
+        prox = next(ta for ta in t_alvos if ta > t * (1.0 + 1e-12))
+        dt_livre = min(dt_max, dt_cfl, 1.5 * dt_ant)
+        dt = dt_livre
+        fim = (prox - t) <= dt * (1.0 + 1e-9)
+        if fim:
+            dt = prox - t
+
+        while True:     # refaz o passo se o CFL real violar a estabilidade da saturação
+            p_n, Sw_n, qT_prod, qw_prod, CFL, smax = passo_impes(G, perm, rp, p, Sw, dt, inj, prod, dFw_max)
+            if CFL <= 1.0 or dt <= dt_min:
+                break
+            dt *= 0.5
+            dt_livre = min(dt_livre, dt)
+            fim = False
+
+        p, Sw = p_n, Sw_n
+        t = prox if fim else t + dt
+        dt_ant = dt_livre
+        dt_cfl = cfl_alvo * G.Vp / (smax * dFw_max) if smax > 0 else np.inf
+
+        tempo.append(t)
+        dts.append(dt)
+        q_w.append(qw_prod)
+        q_o.append(qT_prod - qw_prod)
+        if fim and prox in t_salvos:
+            campos_P[t / DIA] = p.copy()
+            campos_S[t / DIA] = Sw.copy()
+
+    tempo, dts = np.array(tempo), np.array(dts)
+    q_o, q_w = np.array(q_o), np.array(q_w)
+    print(f"[{nome}] Simulação concluída em {time.time() - t_exec:.2f} s ({len(tempo) - 1} passos).")
+
+    return {
+        "campos_P": campos_P, "campos_S": campos_S, "P_final": p, "S_final": Sw,
+        "tempo": tempo / DIA, "q_o": q_o, "q_w": q_w, "q_inj": q_inj_tot,
+        "Np": np.cumsum(q_o * dts), "Wp": np.cumsum(q_w * dts), "Winj": q_inj_tot * tempo_total,
+        "dts": dts
+    }
+
+def validar_simulacao(nome, G, sim, rp):
+    erros = []
+    P, S = sim["P_final"], sim["S_final"]
+    if not (np.all(np.isfinite(P)) and np.all(np.isfinite(S))):
+        erros.append("Pressões ou saturações NaN/infinitas.")
+    if S.min() < rp['Swi'] - 1e-3 or S.max() > 1.0 - rp['Sor'] + 1e-3:
+        erros.append(f"Sw fora do intervalo físico [{S.min():.4f}, {S.max():.4f}].")
+    if P.min() < pw - 1e-3 * BAR:
+        erros.append(f"Pressão mínima ({P.min()/BAR:.2f} bar) menor que p_w.")
+
+    # Balanço de água: acúmulo = injetado - produzido
+    dW = np.sum(G.Vp * (S - rp['Swi']))
+    W_bal = sim["Winj"] - sim["Wp"][-1]
+    erro_w = abs(dW - W_bal) / max(sim["Winj"], 1e-12)
+
+    # Balanço volumétrico total (compressibilidade): acúmulo = injetado - produzido
+    dV_acum = np.sum(G.dV * phi * ct * (P - p_ini))
+    V_bal = sim["Winj"] - (sim["Np"][-1] + sim["Wp"][-1])
+    erro_v = abs(dV_acum - V_bal) / max(sim["Winj"], 1e-12)
+
+    print(f"\n--- RELATÓRIO DE VALIDAÇÃO: {nome} ---")
+    print(f"Pmin: {P.min()/BAR:.2f} bar | Pmax: {P.max()/BAR:.2f} bar | Sw: [{S.min():.4f}, {S.max():.4f}]")
+    print(f"Injetado: {sim['Winj']:.4f} m³ | Np: {sim['Np'][-1]:.4f} m³ | Wp: {sim['Wp'][-1]:.4f} m³")
+    print(f"Erro relativo do balanço de água:     {erro_w:.3e}")
+    print(f"Erro relativo do balanço volumétrico: {erro_v:.3e}")
+
+    if erro_w > 1e-8 or erro_v > 1e-6 or erros:
+        print("STATUS: VERIFICAR")
+        for e in erros:
+            print(f"  -> {e}")
+        return False
+    print("STATUS: PASSOU (Fisicamente coerente e conservação estrita).")
+    return True
+
+# 4. GRÁFICOS
+
+def plotar_campos(campos, G, titulo, rotulo, cmap, vmin, vmax, inj_pos=(), prod_pos=()):
+    fig, axs = plt.subplots(2, 2, figsize=(11.5, 9.8), sharex=True, sharey=True)
+    axs = axs.ravel()
+    aspecto = "equal" if abs(G.Lx - G.Ly) < 1e-9 else "auto"
+
+    for ax, (t_d, campo) in zip(axs, campos.items()):
+        im = ax.imshow(
+            campo, extent=[0, G.Lx, 0, G.Ly], origin="lower",
+            cmap=cmap, vmin=vmin, vmax=vmax, aspect=aspecto
+        )
+        for ii, jj in inj_pos:
+            ax.plot(G.x_c[jj], G.y_c[ii], "^", color="#49006a", markersize=8, markeredgecolor="w", zorder=5)
+        for iw, jw in prod_pos:
+            ax.plot(G.x_c[jw], G.y_c[iw], "kD", markersize=7, markeredgecolor="w", zorder=6)
+
+        ax.set_title(f"t = {t_d:.2f} dias", fontsize=11, pad=10)
+        ax.set_xlabel("X [m]")
+        ax.set_ylabel("Y [m]")
+        ax.set_xlim(0, G.Lx)
+        ax.set_ylim(0, G.Ly)
+
+    fig.subplots_adjust(left=0.08, right=0.84, bottom=0.08, top=0.88, wspace=0.05, hspace=0.25)
+    cbar_ax = fig.add_axes([0.87, 0.12, 0.025, 0.75])
+    fig.colorbar(im, cax=cbar_ax, label=rotulo)
+    fig.suptitle(titulo, fontsize=13, y=0.96)
+    salvar_e_fechar()
+
+def plotar_desempenho(sim, titulo, t_bt=None):
+    t = sim["tempo"]
+    fig, ax_q = plt.subplots(figsize=(6.5, 4))
+    ax_q.plot(t[1:], np.full(len(t) - 1, sim["q_inj"] * DIA), color="#49006a", linestyle="--", linewidth=2, label="Vazão Injetada")
+    ax_q.plot(t[1:], sim["q_o"][1:] * DIA, color="#980043", linestyle="-", linewidth=2, label="Vazão de Óleo")
+    ax_q.plot(t[1:], sim["q_w"][1:] * DIA, color="#df65b0", linestyle="-", linewidth=2, label="Vazão de Água")
+    if t_bt is not None:
+        ax_q.axvline(t_bt, color="gray", linestyle="-.", linewidth=1.5, label="Breakthrough (analítico)")
+    ax_q.set_xlabel("Tempo [dias]")
+    ax_q.set_ylabel("Vazão [m³/dia]")
+    ax_q.grid(True, linestyle="--", alpha=0.5)
+
+    ax_q_twin = ax_q.twinx()
+    ax_q_twin.plot(t, np.concatenate([[0.0], sim["Np"][1:]]), color="#7a0177", linestyle=":", linewidth=2, label="Np (óleo acumulado)")
+    ax_q_twin.plot(t, np.concatenate([[0.0], sim["Wp"][1:]]), color="#f768a1", linestyle=":", linewidth=2, label="Wp (água acumulada)")
+    ax_q_twin.set_ylabel("Produção acumulada [m³]", color="#7a0177")
+
+    h1, l1 = ax_q.get_legend_handles_labels()
+    h2, l2 = ax_q_twin.get_legend_handles_labels()
+    ax_q.legend(h1 + h2, l1 + l2, loc="center left", fontsize=8)
+    plt.title(titulo, fontsize=11)
+    plt.tight_layout()
+    salvar_e_fechar()
+
+def plotar_perfis(G, sim, rp, uT, solucao, titulo):
+    """Compara Sw(x) numérica (linha central) x analítica para os tempos salvos."""
+    campos = sim["campos_S"]
+    cores = plt.cm.PuRd(np.linspace(0.45, 0.95, len(campos)))
+    plt.figure(figsize=(6.5, 4))
+    erros = []
+    for cor, (t_d, S_campo) in zip(cores, campos.items()):
+        S_an, _, _ = solucao(G.x_c, t_d * DIA, uT, rp)
+        S_num = S_campo[G.ny // 2, :]
+        erros.append(np.mean(np.abs(S_num - S_an)))
+        plt.plot(G.x_c, S_an, '-', color=cor, linewidth=2, label=f"t = {t_d:.1f} dias")
+        plt.plot(G.x_c, S_num, 'o', color=cor, markersize=3)
+    plt.plot([], [], color="#980043", linestyle="-", linewidth=2, label="Analítica")
+    plt.plot([], [], color="#980043", marker="o", linestyle="None", markersize=4, label="Numérica (IMPES)")
+    plt.title(titulo, fontsize=11)
+    plt.xlabel("X [m]")
+    plt.ylabel("Saturação de água Sw")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend(fontsize=8)
+    plt.tight_layout()
+    salvar_e_fechar()
+    print(f"Erro médio absoluto em Sw (analítica x numérica): " + " | ".join(f"{e:.3e}" for e in erros))
+
+def plotar_curvas_relativas():
+    S = np.linspace(0.0, 1.0, 400)
+
+    # 1. Permeabilidade relativa (separado)
+    fig1, ax1 = plt.subplots(figsize=(6.5, 4))
+    for rp, nome, cor in [(rp_pistao, "Pistão", "#df65b0"), (rp_corey, "Corey", "#49006a")]:
+        krw, kro = kr(S, rp)
+        ax1.plot(S, krw, '-', color=cor, linewidth=2, label=f"krw ({nome})")
+        ax1.plot(S, kro, '--', color=cor, linewidth=2, label=f"kro ({nome})")
+    ax1.set_xlabel("Sw")
+    ax1.set_ylabel("Permeabilidade relativa")
+    ax1.set_title("Curvas de permeabilidade relativa", fontsize=11)
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(fontsize=8)
+    plt.tight_layout()
+    salvar_e_fechar()
+
+    # 2. Fluxo fracionário (separado)
+    fig2, ax2 = plt.subplots(figsize=(6.5, 4))
+    for rp, nome, cor in [(rp_pistao, "Pistão", "#df65b0"), (rp_corey, "Corey", "#49006a")]:
+        ax2.plot(S, Fw(S, rp), '-', color=cor, linewidth=2, label=nome)
+    ax2.set_xlabel("Sw")
+    ax2.set_ylabel("Fluxo fracionário Fw")
+    ax2.set_title("Curva de fluxo fracionário", fontsize=11)
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    ax2.legend(fontsize=8)
+    plt.tight_layout()
+    salvar_e_fechar()
+
+# 5. CASOS 1D (pistão e Buckley-Leverett): injeção na fronteira oeste, pressão de saída na fronteira leste (Aula 19)
+
+LX_1D, LY_1D = 800.0, 400.0            # Rosa, Ex. 14.7: comprimento até o produtor mais próximo e largura [m]
+Q_ROSA = 150.0 / DIA                  # Rosa, Ex. 14.7: Q_inj = 150 m³/d (Bw = 1, fluidos incompressíveis)
+
+def rodar_caso_1d(nome, rp, solucao, q_inj, pvi_total, pvi_salvos):
+    G = criar_malha(100, 5, LX_1D, LY_1D)
+    perm = np.full((G.ny, G.nx), k_abs)
+    Vp_tot = phi * G.Lx * G.Ly * h
+    uT = q_inj / (G.Ly * h)                                                          # u_T = q_T / A
+    t_total = pvi_total * Vp_tot / q_inj
+    t_salvos = [p * Vp_tot / q_inj for p in pvi_salvos]
+
+    inj = {(i, 0): q_inj / G.ny for i in range(G.ny)}                               # entrada: coluna oeste
+    WI_face = 2.0 * k_abs * G.dy * h / G.dx                                          # Dirichlet na face (Aula 14): 2k/Δx
+    prod = {(i, G.nx - 1): (pw, WI_face) for i in range(G.ny)}                       # saída: coluna leste
+
+    sim = simular_cenario(nome, G, perm, rp, t_total, t_salvos, inj, prod)
+
+    _, Swf, xf = solucao(G.x_c, t_total, uT, rp)
+    t_bt = G.Lx * t_total / xf / DIA                                                 # x_f(t_bt) = L
+    print(f"[{nome}] S_wf = {Swf:.4f} | PVI de breakthrough analítico = {t_bt * DIA * q_inj / Vp_tot:.3f} | t_bt = {t_bt:.2f} dias")
+
+    p_all = [c / BAR for c in sim["campos_P"].values()]
+    plotar_campos({t: c / BAR for t, c in sim["campos_P"].items()}, G, f"{nome}: Campo de Pressão",
+                  "Pressão [bar]", "PuRd", min(c.min() for c in p_all), max(c.max() for c in p_all))
+    plotar_campos(sim["campos_S"], G, f"{nome}: Campo de Saturação de Água",
+                  "Saturação de água Sw", "PuRd", rp['Swi'], 1.0 - rp['Sor'])
+    plotar_perfis(G, sim, rp, uT, solucao, f"{nome}: Saturação Sw ao longo de X")
+    plotar_desempenho(sim, f"{nome}: Vazão e produção acumulada", t_bt=t_bt)
+    validar_simulacao(nome, G, sim, rp)
+    return sim
+
+plotar_curvas_relativas()
+
+# CASO 1: ESCOAMENTO PISTÃO (kr idealizado, mu_w = mu_o)
+sim_c1 = rodar_caso_1d("Caso 1 (Pistão)", rp_pistao, solucao_pistao, q_inj=Q_ROSA, pvi_total=0.8, pvi_salvos=[0.10, 0.25, 0.40, 0.50])
+
+# CASO 2: BUCKLEY-LEVERETT (Corey)
+sim_c2 = rodar_caso_1d("Caso 2 (Buckley-Leverett)", rp_corey, solucao_buckley_leverett, q_inj=Q_ROSA, pvi_total=1.0, pvi_salvos=[0.05, 0.10, 0.20, 0.30])
+
+# 6. CASO 3: 1/4 DE FIVE-SPOT (injetor em um canto, produtor no canto oposto)
+
+G3 = criar_malha(31, 31, 400.0, 400.0)
+perm_c3 = np.full((G3.ny, G3.nx), k_abs)
+
+# Peaceman p/ malha retangular (Aula 11): r_eq = 0,140365 sqrt(Δx² + Δy²);  WI = 2 pi k h / ln(r_eq / r_w)
+req = 0.140365 * np.sqrt(G3.dx ** 2 + G3.dy ** 2)
+WI_peaceman = 2.0 * np.pi * k_abs * h / (np.log(req / rw) + skin)
+WI_canto = 0.25 * WI_peaceman                                         # poço no canto = 1/4 de poço (simetria): mesma fração da vazão do injetor
+
+q_inj3 = Q_ROSA                                                  # m³/s (vazão prescrita no injetor)
+i_inj3, j_inj3 = 0, 0                                                 # canto inferior esquerdo
+i_prod3, j_prod3 = G3.ny - 1, G3.nx - 1                               # canto superior direito
+Vp_tot3 = phi * G3.Lx * G3.Ly * h
+pvi3 = [0.10, 0.25, 0.40, 0.60]
+
+sim_c3 = simular_cenario("Caso 3 (Five-Spot)", G3, perm_c3, rp_corey, 0.8 * Vp_tot3 / q_inj3,
+                         [p * Vp_tot3 / q_inj3 for p in pvi3],
+                         {(i_inj3, j_inj3): q_inj3}, {(i_prod3, j_prod3): (pw, WI_canto)})
+
+p_all3 = [c / BAR for c in sim_c3["campos_P"].values()]
+plotar_campos({t: c / BAR for t, c in sim_c3["campos_P"].items()}, G3, "Caso 3 (Five-Spot): Campo de Pressão",
+              "Pressão [bar]", "PuRd", pw / BAR, max(c.max() for c in p_all3),
+              [(i_inj3, j_inj3)], [(i_prod3, j_prod3)])
+plotar_campos(sim_c3["campos_S"], G3, "Caso 3 (Five-Spot): Campo de Saturação de Água",
+              "Saturação de água Sw", "PuRd", rp_corey['Swi'], 1.0 - rp_corey['Sor'],
+              [(i_inj3, j_inj3)], [(i_prod3, j_prod3)])
+plotar_desempenho(sim_c3, "Caso 3 (Five-Spot): Vazão e produção acumulada")
+validar_simulacao("Caso 3 (Five-Spot)", G3, sim_c3, rp_corey)
+
+# 7. COMPARAÇÃO COM O LIVRO DO ROSA — Exemplo 14.8 (Corey, mu_w = 0,5 cP, mu_o = 5 cP, Swi = 0,25, Sor = 0,20)
+#    Referência do livro (Fig. 14.64): saturação média atrás da frente = 0,55 / 0,64 / 0,72 (casos 1 / 2 / 3)
+
+def comparar_rosa():
+    casos = [("Caso 1 (krw0=0,4; nw=2)", 0.4, 2.0, 0.55), ("Caso 2 (krw0=0,4; nw=4)", 0.4, 4.0, 0.64),
+             ("Caso 3 (krw0=0,1; nw=4)", 0.1, 4.0, 0.72)]
+    G = criar_malha(100, 5, LX_1D, LY_1D)
+    perm = np.full((G.ny, G.nx), k_abs)
+    Vp_tot = phi * G.Lx * G.Ly * h
+    q_inj = Q_ROSA
+    uT = q_inj / (G.Ly * h)
+    inj = {(i, 0): q_inj / G.ny for i in range(G.ny)}
+    prod = {(i, G.nx - 1): (pw, 2.0 * k_abs * G.dy * h / G.dx) for i in range(G.ny)}
+
+    fig_f, ax_f = plt.subplots(figsize=(6.5, 4))
+    S_g = np.linspace(0.0, 1.0, 400)
+    print("\n--- COMPARAÇÃO COM O ROSA (Exemplo 14.8) ---")
+    print(f"{'Caso':26s}{'Swf':>7s}{'S_med BT':>10s}{'Rosa':>7s}{'PVI_bt (an)':>13s}{'PVI_bt (num)':>14s}{'Np/Np_an':>10s}")
+
+    for cor, (nome, krw0, nw, S_rosa) in zip(["#df65b0", "#980043", "#49006a"], casos):
+        rp = dict(rp_corey, krw0=krw0, nw=nw)
+        Swf = saturacao_frente(rp)
+        S_med = rp['Swi'] + 1.0 / dFw(Swf, rp)                        # Welge: Sw média atrás da frente no breakthrough
+        t_bt = G.Lx * phi / (uT * dFw(Swf, rp))                       # [s]  x_f(t_bt) = L
+        pvi_bt = q_inj * t_bt / Vp_tot
+        t_salvos = [0.5 * t_bt, 0.9 * t_bt]
+        sim = simular_cenario(nome, G, perm, rp, 1.3 * t_bt, t_salvos, inj, prod)
+
+        # Perfis do Rosa separados (1 gráfico por caso)
+        fig_p, ax = plt.subplots(figsize=(6.5, 4))
+        for t_d, ls in zip(sim["campos_S"], ["--", "-"]):
+            S_an, _, _ = solucao_buckley_leverett(G.x_c, t_d * DIA, uT, rp)
+            ax.plot(G.x_c, S_an, ls, color="#ae017e", linewidth=1.8, label=f"Analítica (t = {t_d:.0f} d)")
+            ax.plot(G.x_c, sim["campos_S"][t_d][G.ny // 2, :], "o", color=cor, markersize=3, label=f"Numérica (t = {t_d:.0f} d)")
+        ax.set_title(f"Rosa (Ex. 14.8) - {nome}", fontsize=11)
+        ax.set_xlabel("X [m]")
+        ax.set_ylabel("Saturação de água Sw")
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(fontsize=8)
+        plt.tight_layout()
+        salvar_e_fechar()
+
+        ax_f.plot(S_g, Fw(S_g, rp), color=cor, linewidth=2, label=f"{nome}")
+        ax_f.plot(Swf, Fw(Swf, rp), color="#980043", marker="o", linestyle="None", markersize=5)
+
+        wc = sim["q_w"] / np.maximum(sim["q_w"] + sim["q_o"], 1e-30)
+        pvi_num = q_inj * sim["tempo"][np.argmax(wc > 0.01)] * DIA / Vp_tot
+        Np_an = Vp_tot * (S_med - rp['Swi'])
+        Np_num = np.interp(t_bt / DIA, sim["tempo"], sim["Np"])
+        print(f"{nome:26s}{Swf:7.3f}{S_med:10.3f}{S_rosa:7.2f}{pvi_bt:13.3f}{pvi_num:14.3f}{Np_num / Np_an:10.3f}")
+
+    plt.figure(fig_f.number)
+    ax_f.set_xlabel("Sw")
+    ax_f.set_ylabel("Fluxo fracionário Fw")
+    ax_f.set_title("Rosa (Ex. 14.8): Fluxo fracionário e frente de choque", fontsize=11)
+    ax_f.grid(True, linestyle="--", alpha=0.5)
+    ax_f.legend(fontsize=8)
+    plt.tight_layout()
+    salvar_e_fechar()
+
+comparar_rosa()
+
+print("\nPasta onde os gráficos foram salvos:")
+print(os.path.abspath(PASTA_GRAFICOS))
+
+if sys.platform.startswith("win"):
+    os.startfile(os.path.abspath(PASTA_GRAFICOS))
