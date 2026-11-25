@@ -434,7 +434,7 @@ perm_c3 = np.full((G3.ny, G3.nx), k_abs)
 # Peaceman p/ malha retangular (Aula 11): r_eq = 0,140365 sqrt(Δx² + Δy²);  WI = 2 pi k h / ln(r_eq / r_w)
 req = 0.140365 * np.sqrt(G3.dx ** 2 + G3.dy ** 2)
 WI_peaceman = 2.0 * np.pi * k_abs * h / (np.log(req / rw) + skin)
-WI_canto = 0.25 * WI_peaceman                                         # poço no canto = 1/4 de poço (simetria): mesma fração da vazão do injetor
+WI_canto = WI_peaceman                                        # poço no canto
 
 q_inj3 = Q_ROSA                                                  # m³/s (vazão prescrita no injetor)
 i_inj3, j_inj3 = 0, 0                                                 # canto inferior esquerdo
